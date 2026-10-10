@@ -1,5 +1,7 @@
 import { beforeAll, describe, test, expect } from "bun:test";
 import {
+  type DialectGenerators,
+  generateRowActionQuery,
   generateTableQuery,
   generateSelectQuery,
   outermostFieldPaths,
@@ -33,6 +35,8 @@ import { MILVUS_CONSOLE, MILVUS_ROUTES } from "@/lib/db/providers/vector/milvus/
 import { qdrantSelectQuery, qdrantTableQuery } from "@/lib/db/providers/vector/qdrant/generators";
 import { parseOxiaCommand } from "@/lib/db/providers/keyvalue/oxia/commands";
 import { oxiaSelectQuery, oxiaTableQuery } from "@/lib/db/providers/keyvalue/oxia/generators";
+import { parseS3Command } from "@/lib/db/providers/objectstore/s3/console/commands";
+import { s3SelectQuery, s3TableQuery } from "@/lib/db/providers/objectstore/s3/console/generators";
 import { QDRANT_CONSOLE, QDRANT_ROUTES } from "@/lib/db/providers/vector/qdrant/routes";
 import { NEO4J_POLICY_PROFILE } from "@/lib/db/providers/graph/neo4j/profile";
 import { db2Capabilities } from "@/lib/db/providers/sql/db2/capabilities";
@@ -2252,14 +2256,18 @@ describe("PromQL Generate Query (#1085)", () => {
  * read only inside a `queryLanguage === "json"` arm: the three generators' own, the profiler's after
  * the language refusal above, and Generate Test Data's, which no metric row offers. `outermostFieldPaths`
  * reduces MongoDB field paths for a projection and is read in the same two `json` places: the select
- * generator's arm and the profiler's MongoDB branch. An export added later has
- * no classification, so this list fails until somebody writes one for it.
+ * generator's arm and the profiler's MongoDB branch. `generateRowActionQuery` is read only by the tab
+ * manager's `runRowAction`, which only a row menu item reaches, and the menu offers one only for a kind
+ * the provider names in `rowActions`; Prometheus declares none (its capability object is pinned in
+ * tests/unit/db/prometheus/provider.test.ts), and the function raises for a dialect with no `rowAction`.
+ * An export added later has no classification, so this list fails until somebody writes one for it.
  */
 describe("the module's exports, for a PromQL connection (#1085)", () => {
   test("every export is one this file has classified", () => {
     expect(Object.keys(generators).sort()).toEqual([
       "escapeGlob",
       "generateCountQuery",
+      "generateRowActionQuery",
       "generateSelectQuery",
       "generateTableQuery",
       "jsonCommandAddress",
@@ -2505,5 +2513,77 @@ describe("generateTableQuery and generateSelectQuery: Oxia", () => {
 
   test("offers no count statement", () => {
     expect(generators.generateCountQuery(path, oxiaCaps)).toBeNull();
+  });
+});
+
+// S3: both generators read the DIALECT_GENERATORS record, which writes the console's own
+// browser-safe text, every output a command the console's parser accepts, and no count statement.
+describe("generateTableQuery and generateSelectQuery: S3", () => {
+  const s3Caps = makeCaps({ queryLanguage: "json", queryDialect: "s3", supportsExplain: false });
+
+  test("the click on a bucket lists its top level, never a MongoDB find", () => {
+    const text = generateTableQuery(["sales"], s3Caps, []);
+    expect(text).toBe(s3TableQuery(["sales"]));
+    expect(text).toBe("aws s3 ls s3://sales/");
+    const parsed = parseS3Command(text, {});
+    expect(parsed.ok && parsed.parsed.command).toMatchObject({ kind: "ls", bucket: "sales", prefix: "" });
+  });
+
+  test("Generate Command writes the listing, with two reads as comments", () => {
+    const text = generateSelectQuery(["sales"], [], s3Caps);
+    expect(text).toBe(s3SelectQuery(["sales"]));
+    expect(text.split("\n").slice(1)).toEqual([
+      "# aws s3api list-objects-v2 --bucket sales --delimiter / --max-items 50",
+      "# aws s3api get-bucket-versioning --bucket sales",
+    ]);
+    expect(parseS3Command(text, {}).ok).toBe(true);
+  });
+
+  test("offers no count statement", () => {
+    expect(generators.generateCountQuery(["sales"], s3Caps)).toBeNull();
+  });
+});
+
+// ============================================================================
+// Declared row actions: the dialect's own `rowAction` writes what a row menu item runs
+// ============================================================================
+
+describe("generateRowActionQuery", () => {
+  /** A dialect record that writes a row action, injected because no shipped dialect writes one yet. */
+  const asked: { path: readonly string[]; actionId: string; kind?: string; readOnly?: boolean }[] = [];
+  const writing: DialectGenerators = {
+    table: () => "table",
+    select: () => "select",
+    rowAction: (path, actionId, scope) => {
+      asked.push({ path, actionId, kind: scope.kind, readOnly: scope.readOnly });
+      return `${actionId} ${scope.kind}/${path[path.length - 1]}`;
+    },
+  };
+  const kafkaCaps = makeCaps({ queryLanguage: "json", queryDialect: "kafka" });
+
+  test("hands the dialect's generator the path, the action id and the object's kind, and returns its statement", () => {
+    const text = generateRowActionQuery(
+      ["shop", "web-1"],
+      "describe",
+      kafkaCaps,
+      { kind: "pods", readOnly: true },
+      {
+        kafka: writing,
+      },
+    );
+    expect(text).toBe("describe pods/web-1");
+    expect(asked).toEqual([{ path: ["shop", "web-1"], actionId: "describe", kind: "pods", readOnly: true }]);
+  });
+
+  test("raises for a dialect that writes no row action, which is every shipped one", () => {
+    expect(() => generateRowActionQuery(["orders"], "describe", kafkaCaps, { kind: "topic" })).toThrow(
+      'the kafka dialect writes no statement for the row action "describe"',
+    );
+  });
+
+  test("raises for a declaration that names no dialect, by its query language", () => {
+    expect(() =>
+      generateRowActionQuery(["orders"], "describe", makeCaps(), { kind: "table" }, { kafka: writing }),
+    ).toThrow('the sql dialect writes no statement for the row action "describe"');
   });
 });

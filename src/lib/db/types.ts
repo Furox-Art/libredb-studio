@@ -467,14 +467,15 @@ export type TypedConfirmationAsk =
  *
  * The route writes exactly two statement shapes: SQL aggregates, and a MongoDB `aggregate`
  * document with a `$sample` stage. So profiling is offered for `"sql"`, and for `"json"` only
- * when no `queryDialect` says the JSON is some other grammar. Redis, LibreDB, Kafka and etcd declare
+ * when no `queryDialect` says the JSON is some other grammar. Several engines, among them Redis, LibreDB, Kafka
+ * and etcd, declare
  * `"json"` with a dialect of their own, a Kafka read request being JSON of this product's own
  * schema (#1088) and an etcd command a line of etcdctl's (#1089), and `"promql"` is not JSON at all;
  * before this gate the route sent Redis,
  * LibreDB and Prometheus the MongoDB document, which only MongoDB reads (#1085).
  *
  * A dialect's answer is its record's `offersColumnProfiling` in `QUERY_DIALECTS`
- * (`src/lib/db/query-dialects.ts`), false for all four. It is read beside `"json"` only: the language is read
+ * (`src/lib/db/query-dialects.ts`), false for every dialect there. It is read beside `"json"` only: the language is
  * first, so a dialect declared beside `"sql"` is offered profiling, while `offersCountQuery` below withholds its
  * count. The asymmetry is kept on purpose, because changing either answer would change what a menu offers. A
  * declared dialect with no record, which only a host's own declaration can name, is refused, as it always was.
@@ -645,7 +646,7 @@ export interface KeyScanLevels {
  * Whether an engine can page a resumable walk of its own KEY SPACE, and the batch sizes it
  * will accept.
  *
- * THE ENGINE THIS EXISTS FOR IS THE ONE WITH NO CATALOG. Sixteen engines answer
+ * THE ENGINES THIS EXISTS FOR ARE THE ONES WITH NO CATALOG. Most engines answer
  * `listObjects` from a stored definition — a table, a collection, an index — and a stored
  * definition is enumerable in full. A Redis key is not: there is no prefix index and no
  * directory, so the only way to learn what exists is `SCAN`, and `SCAN` is a CURSOR rather
@@ -845,6 +846,24 @@ export interface KeyScanPage {
   readonly prefixes?: readonly string[];
 }
 
+/**
+ * One action a row of a NON-RELATION kind offers, declared by the provider that writes its statement.
+ *
+ * The row menu offers it on every object of a kind named in `kinds`, and choosing it opens a new tab
+ * that runs what the dialect's `rowAction` generator writes for that object (`src/lib/query-generators.ts`).
+ * `id` is what the generator is asked for and stays stable; `label` is what the menu and the tab read.
+ *
+ * A row action reads and never writes: it runs on click, with no role asked and no editing step, so
+ * one that wrote would put a write behind an ungated menu item. Its statement honours
+ * `GeneratorScope.readOnly` like every other generated read.
+ */
+export interface KindRowAction {
+  readonly id: string;
+  readonly label: string;
+  /** The `ObjectKindSpec.id`s whose rows offer this action. */
+  readonly kinds: readonly string[];
+}
+
 export interface ProviderCapabilities {
   /**
    * The language this engine's statements are written in: what its editor tabs are typed and
@@ -903,12 +922,15 @@ export interface ProviderCapabilities {
    *
    * `"oxia"` is the Oxia provider's: one `oxia client` read command per run (O10).
    *
+   * `"s3"` is the S3 provider's: one AWS CLI read command per run, `aws s3 ls`, the `aws s3api` reads its table names,
+   * or Studio's own `preview`.
+   *
    * Those arms are now records: a member added here does not compile until it has one in each of
    * `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`)
    * and `DIALECT_GENERATORS` (`src/lib/query-generators.ts`), and every other reader of this field and of
    * `queryLanguage` is held to a closed list by `tests/unit/lib/dialect-reader-allowlist.test.ts`.
    */
-  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant" | "oxia";
+  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant" | "oxia" | "s3";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).
@@ -1116,7 +1138,8 @@ export interface ProviderCapabilities {
    * Whether this provider's relation-shaped rows are objects the engine holds, or
    * groupings this server derived from a bounded scan of what it found.
    *
-   * True on Redis and LibreDB and nowhere else. Neither engine has a schema to read:
+   * True on the engines whose rows are key-prefix groups, among them Redis, LibreDB
+   * and etcd. None of them has a schema to read, and on Redis and LibreDB
    * the walk scans a bounded slice of the keyspace — 1000 keys on Redis, 10000 on
    * LibreDB — and collapses the real key names it found into one row per common
    * prefix. So a row named `user:*` is not a key, was never named by anybody, and no
@@ -1136,8 +1159,8 @@ export interface ProviderCapabilities {
    * absent flag reads as "these rows are real objects" — the ordinary case, and the
    * one every SQL engine and every document engine is in. Reading `connection.type` at
    * the consumer was the alternative and is forbidden by `CLAUDE.md` for the reason
-   * this pair of engines demonstrates: the two that answer true are not the two a
-   * reader would guess, and a third would be added to a provider and forgotten here.
+   * for the reason the engines that answer true demonstrate: they are not the ones a
+   * reader would guess, and the next one would be added to a provider and forgotten here.
    */
   tablesAreDerivedGroupings?: boolean;
   /**
@@ -1145,7 +1168,7 @@ export interface ProviderCapabilities {
    * opening the file takes an exclusive lock: a second open of a file this process
    * already holds does not return a second handle, it throws.
    *
-   * `libredb` is the only engine that declares it. `lib.open({ path })` takes an
+   * `libredb` is one of the engines that declare it. `lib.open({ path })` takes an
    * exclusive `<path>.lock` sidecar and a second open of the same path throws
    * `LibreDbError` with `code: "LOCKED"` - measured 2026-08-25 against
    * `@libredb/libredb` 0.2.2, in one process. SQLite is the engine a reader would
@@ -1444,6 +1467,40 @@ export interface ProviderCapabilities {
    * reader behind it would draw a panel whose every gesture fails.
    */
   keyScan?: KeyScanCapability;
+  /**
+   * Which containers the agent's grounding walk reads.
+   *
+   * Absent: every container, as before. `{ mode: "session-default" }`: the one container `listContainers` marks
+   * `isSessionDefault` at the deepest level, plus each container `alsoWalk` names by its full path. The walk counts
+   * the containers it left out and the inventory says so as `AgentInventory.unreadContainers`, so a model is never
+   * handed one container as the whole database. It is for an engine whose container count makes a whole walk cost
+   * hundreds of reads.
+   *
+   * Optional for the same published-interface reason as `containerLevels`.
+   */
+  agentWalkScope?: {
+    readonly mode: "session-default";
+    readonly alsoWalk?: readonly (readonly string[])[];
+  };
+  /**
+   * The row actions this engine offers on objects of named kinds, in menu order. See `KindRowAction`.
+   *
+   * Absent: no row offers one, which is every engine declared before this field existed. Read through
+   * `rowActionsForKind()` in `src/lib/db/object-kinds.ts`. Present implies the engine's query dialect
+   * writes each one through `DialectGenerators.rowAction`.
+   */
+  rowActions?: readonly KindRowAction[];
+  /**
+   * This engine's containers answer `Container.kinds`, the kinds each one holds.
+   *
+   * Read by the inventory route for the containers a body NAMES: only an engine that declares it pays
+   * one container listing per distinct parent to learn their kinds, and a named container that listing
+   * does not hold is refused, because the kinds it holds are unknown. Absent: named containers are read
+   * for every enumerable kind with no listing, which is every engine declared before this field
+   * existed. The object-surface conformance refuses a container answering `kinds` on an engine that
+   * does not declare it.
+   */
+  containersNameKinds?: true;
   schemaRefreshPattern: string;
 }
 
@@ -1459,10 +1516,10 @@ export interface ProviderLabels {
   /**
    * Which operation `vacuumAction` and the `vacuumGlobal*` triad actually NAME.
    *
-   * Four providers point that wording at something that is not `vacuum`: ClickHouse's
+   * Several providers point that wording at something that is not `vacuum`. ClickHouse's
    * *"Optimize Table"* and SQL Server's, Oracle's and MySQL's *"Rebuild Indexes"* /
-   * *"Optimize Table"* each stand for the `optimize` the provider declares. MySQL
-   * rendered the base default *"Vacuum Table"* for an engine whose operations
+   * *"Optimize Table"*, for example, each stand for the `optimize` the provider declares.
+   * MySQL rendered the base default *"Vacuum Table"* for an engine whose operations
    * are `analyze`/`optimize`/`check`/`kill`. The global vacuum card was gated on the
    * literal `vacuum`, so every one of those provider's own words was written and never
    * shown, and the per-row item named an operation the page behind it could not run.
@@ -1474,14 +1531,14 @@ export interface ProviderLabels {
    * the card stays withheld, which is the honest outcome rather than pointing the
    * words at the unrelated `reindex` it does declare.
    * `analyzeAction` needs no twin of this, but not because every engine's analyze
-   * wording stands for `analyze`: read across the providers, three point it at nothing
-   * runnable - Trino's *"Table Statistics"*, the search family's *"Index Statistics"*
-   * and the embedded LibreDB's *"Key Info"*. What makes the twin unnecessary is the
-   * other half of each of those three: none of them declares an `analyze` operation
-   * (`maintenanceOperations` is `['kill']` on Trino and `[]` on the other two), so the
-   * control is withheld there by the declaration alone. Not one provider points its
-   * analyze wording at a DIFFERENT operation it does declare, which is the only case a
-   * twin field would resolve.
+   * wording stands for `analyze`: read across the providers, several point it at nothing
+   * runnable, among them Trino's *"Table Statistics"*, the search family's
+   * *"Index Statistics"* and the embedded LibreDB's *"Key Info"*. What makes the twin
+   * unnecessary is the other half of each of those: none of them declares an `analyze` operation
+   * (`maintenanceOperations` is `['kill']` on Trino and `[]` on the search family and on
+   * LibreDB), so the control is withheld there by the declaration alone. Not one
+   * provider points its analyze wording at a DIFFERENT operation it does declare, which is
+   * the only case a twin field would resolve.
    */
   vacuumActionOperation?: MaintenanceType;
   searchPlaceholder: string;
@@ -1496,8 +1553,8 @@ export interface ProviderLabels {
    *
    * The analyze and vacuum cards have carried per-provider wording since #427; the
    * reindex card stayed hardcoded to PostgreSQL's "Run Reindex" / "Rebuild Indexes" /
-   * "Reconstructs all indexes in the database." Three providers declare the `reindex`
-   * maintenance operation — Postgres, SQLite and Couchbase — and on Couchbase that
+   * "Reconstructs all indexes in the database." Several providers declare the `reindex`
+   * maintenance operation, and on one of them, Couchbase, that
    * copy is wrong the way the analyze copy was wrong for Redis: its reindex builds
    * deferred GSI indexes, which is not a table reindex.
    *
@@ -1516,16 +1573,17 @@ export interface ProviderLabels {
    * What a statement for this engine is WRITTEN IN, named for a model rather than
    * for a person, and declared only where the engine's own name misleads one.
    *
-   * Read by the agent's plan contract (`src/lib/agent/investigation.ts`). Every
-   * other engine leaves it absent: a connection stamped `postgres` needs nobody to
-   * add that its statements are PostgreSQL SQL, and a sentence saying so would spend
+   * Read by the agent's plan contract (`src/lib/agent/investigation.ts`). An engine
+   * whose statements a model would write correctly unprompted leaves it absent: a
+   * connection stamped `postgres` needs nobody to add that its statements are PostgreSQL
+   * SQL, and a sentence saying so would spend
    * prompt on a fact the dialect line already carries.
    *
    * It exists because `queryLanguage: "sql"` is not always believable from outside.
    * Measured 2026-08-19: a plan run on an OpenSearch connection, asked for one
    * runnable statement, produced a native aggregation body - correct for the
-   * product, unrunnable through a SQL endpoint - and the two search engines are the
-   * only shipped engines whose names carry a stronger prior than their capability.
+   * product, unrunnable through a SQL endpoint - and the names of the two search engines
+   * carry a stronger prior than their capability.
    * A provider sets this when a model asked for "a statement" would reasonably write
    * the wrong language.
    */
@@ -2627,6 +2685,32 @@ export interface ObjectKindSpec {
    * before, a refused count and all.
    */
   readonly countIsListing?: true;
+  /**
+   * Whether THIS KIND's object names may reach a machine surface.
+   *
+   * Absent: they may, as every kind's always have. `"withheld"`: the object surface lists them to the user, in the
+   * tree and the console, and the agent's grounding walk counts the kind and lists none of it, so no name of this
+   * kind reaches the model; the inventory carries the count as `AgentInventoryKind.withheldCount`, or marks the kind
+   * `withheldUncounted` where a container read gave no count for it. It is for a kind whose names are themselves
+   * sensitive, such as stored secrets, whose names often say what they hold.
+   *
+   * Read through `kindNamesWithheld()` in `src/lib/db/object-kinds.ts`. The walk knows such a kind's size only
+   * through its count, so a provider that declares it counts it in `countObjects`. The walk is the only machine
+   * surface the declaration reaches, so it holds only where no other one lists the kind: the kind's role is not
+   * `relation` (MCP's `inspect_schema` and the app's schema read list relations, and `relationKindIds` refuses a
+   * withheld one), the engine is not `MCP_EXPOSABLE`, and the provider has no `queryReadOnly`, the agent's read
+   * path. The fleet declarations guard in `tests/isolated/object-source-declarations.test.ts` holds all three.
+   */
+  readonly machineNames?: "withheld";
+  /**
+   * The folder this kind is drawn in, between its container and its own folder: Workloads, Config.
+   *
+   * Absent: the kind's folder hangs directly under the container, as every kind did before this
+   * field existed. A group is drawn only where at least two of its kinds apply to the container; with
+   * one, that kind's folder sits directly under the container, and with none the group is not drawn.
+   * Kinds that share an `id` share the folder, which takes the `label` of the first of them.
+   */
+  readonly group?: { readonly id: string; readonly label: string };
 }
 
 /** One container level. Zero, one or two of these; the engine says which. */
@@ -2654,6 +2738,17 @@ export interface Container {
    * entry is their own.
    */
   readonly isSessionDefault?: boolean;
+  /**
+   * The ids of the enumerable kinds this container holds, when it does not hold all of them.
+   *
+   * Absent: every enumerable kind applies, which is every engine declared before this field existed.
+   * A cluster's cluster-scoped kinds and its namespaced kinds are the case it exists for. Read through
+   * `applicableKinds()` in `src/lib/db/object-kinds.ts`: the tree, the inventory and search routes and
+   * the agent's grounding walk ask a container only for these, and a provider answers a kind outside
+   * them with an error sentence rather than an empty list. An engine whose containers answer it
+   * declares `ProviderCapabilities.containersNameKinds`.
+   */
+  readonly kinds?: readonly string[];
 }
 
 /**

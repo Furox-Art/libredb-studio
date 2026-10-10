@@ -46,6 +46,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useConnectionForm } from "@/hooks/use-connection-form";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { WireCompatibilityHint } from "@/components/WireCompatibilityHint";
+import { ConnectionImportPanel } from "@/components/ConnectionImportPanel";
 
 /**
  * What each SSL mode actually does, in the panel where it is chosen.
@@ -199,6 +200,8 @@ export function ConnectionModal({
     setDataServers,
     warehouse,
     setWarehouse,
+    region,
+    setRegion,
     connectionString,
     setConnectionString,
     mongoConnectionMode,
@@ -270,6 +273,7 @@ export function ConnectionModal({
     handleTestConnection,
     handleConnect,
     handlePasteConnectionString,
+    applyImported,
 
     // Derived data
     dbTypes,
@@ -537,6 +541,14 @@ export function ConnectionModal({
 
           {/* Wire-compatible engines served by the selected driver (#424) */}
           <WireCompatibilityHint type={type} />
+
+          {/*
+            The import the selected engine declares, read from its entry rather than an isX branch, and only for a
+            new connection. Keyed by the type, so a switch to another engine drops whatever the import had read.
+          */}
+          {!isEditMode && uiConfig.connectionImport !== undefined && (
+            <ConnectionImportPanel key={type} declaration={uiConfig.connectionImport} onApply={applyImported} />
+          )}
 
           <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <>
@@ -863,6 +875,32 @@ export function ConnectionModal({
                         className="h-10 bg-panel border-hairline focus:border-brand-tint/50 transition-all text-xs font-mono"
                       />
                       <DeclaredFieldHint config={uiConfig} field="warehouse" />
+                    </div>
+                  )}
+
+                  {/*
+                    The region S3 requests are signed for, drawn where the engine takes the field, the way the
+                    warehouse is. The provider checks the text and names the field when it refuses it.
+                  */}
+                  {takesConnectionField(type, "region") && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <Globe strokeWidth={1.5} className="w-3 h-3 text-fg-muted" />
+                        <Label htmlFor="region" className="text-xs font-medium text-fg-muted">
+                          {connectionFieldLabel(uiConfig, "region", "Region")}
+                        </Label>
+                      </div>
+                      <Input
+                        id="region"
+                        value={region}
+                        onChange={(e) => setRegion(e.target.value)}
+                        placeholder={connectionFieldPlaceholder(uiConfig, "region", "us-east-1")}
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-describedby={describedByHint(uiConfig, "region")}
+                        className="h-10 bg-panel border-hairline focus:border-brand-tint/50 transition-all text-xs font-mono"
+                      />
+                      <DeclaredFieldHint config={uiConfig} field="region" />
                     </div>
                   )}
 
@@ -1194,7 +1232,9 @@ export function ConnectionModal({
                       aria-describedby={describedByHint(uiConfig, "allowInsecureAuth")}
                       className="rounded border-edge bg-panel"
                     />
-                    <span className="text-xs font-medium text-warning">Send the password without TLS</span>
+                    <span className="text-xs font-medium text-warning">
+                      {connectionFieldLabel(uiConfig, "allowInsecureAuth", "Send the password without TLS")}
+                    </span>
                   </label>
                   <DeclaredFieldHint config={uiConfig} field="allowInsecureAuth" />
                 </div>

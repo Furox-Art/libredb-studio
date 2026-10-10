@@ -33,6 +33,11 @@ export interface DialectSpec {
    * `src/lib/db/types.ts`). Absent means it does; Milvus's and Qdrant's records are the ones that decline them.
    */
   readonly offersSqlExport?: boolean;
+  /**
+   * The flags whose values query history must never keep (`maskStatementForHistory` in `src/lib/history-mask.ts`).
+   * Absent means history keeps the statement as typed, which is every dialect's answer until one declares it.
+   */
+  readonly historyMask?: { readonly credentialFlags: readonly string[] };
 }
 
 /**
@@ -91,6 +96,15 @@ export const QUERY_DIALECTS: Readonly<Record<QueryDialect, DialectSpec>> = Objec
   // profile, model or count statement of its grammar applies, and neither SQL export format applies.
   oxia: Object.freeze({
     tabType: "oxia",
+    offersColumnProfiling: false,
+    offersCodeGeneration: false,
+    offersCountQuery: false,
+    offersSqlExport: false,
+  }),
+  // S3: a command line of AWS CLI reads. Its rows are listings and fields of a fixed shape, so
+  // no profile, model or count statement applies, and neither SQL export format applies.
+  s3: Object.freeze({
+    tabType: "s3",
     offersColumnProfiling: false,
     offersCodeGeneration: false,
     offersCountQuery: false,

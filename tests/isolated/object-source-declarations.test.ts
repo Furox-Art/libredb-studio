@@ -70,7 +70,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { TreeRowModel } from "@/components/object-tree/flatten";
 import { rowActions, type TreeRowActionHandlers } from "@/components/object-tree/row-actions";
-import { EXTERNAL_DATABASE_TYPES, SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
+import { EXTERNAL_DATABASE_TYPES, MCP_EXPOSABLE, SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { createDatabaseProvider } from "@/lib/db/factory";
 import { declaredKinds, findKind } from "@/lib/db/object-kinds";
 import type { DatabaseObject, ObjectKindSpec, ProviderCapabilities } from "@/lib/db/types";
@@ -158,6 +158,9 @@ const SOURCE_DECLARATIONS: Readonly<Record<DatabaseType, readonly string[]>> = O
   oxia: ["shard/json", "key/json"],
   // Every kind has a source (design 2.4), Databend's own SQL text.
   databend: ["table/sql", "view/sql", "materialized_view/sql", "dynamic_table/sql"],
+  // Both kinds have a source, JSON under the declared language: a bucket's parts and an object's metadata
+  // and preview, serialised by the provider.
+  s3: ["bucket/json", "object/json"],
   libredb: [],
 });
 
@@ -247,9 +250,9 @@ describe("the fleet census of object source declarations", () => {
     // The population every assertion below iterates. If this were empty or short, each of those
     // loops would certify only the engines it happened to reach, so it is asserted first.
     expect([...CENSUS_TYPES].sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
-    // EXTERNAL_DATABASE_TYPES.length (27 with db2, neo4j, milvus, qdrant, influxdb, influxdb3, oxia and databend) plus
+    // EXTERNAL_DATABASE_TYPES.length (28 with db2, neo4j, milvus, qdrant, influxdb, influxdb3, oxia, databend and s3) plus
     // the embedded store.
-    expect(CENSUS_TYPES).toHaveLength(28);
+    expect(CENSUS_TYPES).toHaveLength(29);
     expect(Object.keys(SOURCE_DECLARATIONS).sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
   });
 
@@ -267,13 +270,13 @@ describe("the fleet census of object source declarations", () => {
     // `hasSource` moves between the two halves, so both halves must be pinned or the total alone
     // would still be satisfied. Neither half may be edited to match a build: if this fails, the
     // DECLARATION is wrong or the design's table is, and the repair is one of those two.
-    expect(UNCONNECTED_SOURCE_KINDS).toHaveLength(85);
-    expect(rows.filter((row) => row.kind.hasSource === true)).toHaveLength(85);
+    expect(UNCONNECTED_SOURCE_KINDS).toHaveLength(87);
+    expect(rows.filter((row) => row.kind.hasSource === true)).toHaveLength(87);
     // neo4j added four kinds, none source-bearing, db2 five source-bearing kinds and four others, milvus and
     // qdrant one source-bearing kind each, influxdb and influxdb3 one kind each, neither source-bearing, oxia
-    // two source-bearing kinds, and databend four source-bearing kinds.
+    // two source-bearing kinds, databend four source-bearing kinds, and s3 two source-bearing kinds.
     expect(rows.filter((row) => row.kind.hasSource !== true)).toHaveLength(33);
-    expect(rows).toHaveLength(118);
+    expect(rows).toHaveLength(120);
   });
 
   test("the MariaDB branch declares two more, which an unconnected provider cannot show", async () => {
@@ -299,10 +302,10 @@ describe("the fleet census of object source declarations", () => {
       [],
     );
     expect(mariadbRows.filter((row) => row.kind.hasSource === true)).toHaveLength(8);
-    // 87 on a MariaDB connection against 85 unconnected: the design states both numbers because
+    // 89 on a MariaDB connection against 87 unconnected: the design states both numbers because
     // criterion 2's evidence method reads an unconnected provider and would otherwise
     // structurally exclude the two riskiest declarations in the phase.
-    expect(UNCONNECTED_SOURCE_KINDS.length + MARIADB_EXTRA_SOURCE_KINDS.length).toBe(87);
+    expect(UNCONNECTED_SOURCE_KINDS.length + MARIADB_EXTRA_SOURCE_KINDS.length).toBe(89);
   });
 
   /*
@@ -388,8 +391,8 @@ describe("the fleet census of object source declarations", () => {
         throw new Error(`the half-declaration guard never reached ${extra}, so it does not cover the MariaDB branch`);
       }
     }
-    // 118 unconnected kinds plus the MariaDB branch's eight.
-    expect(rows).toHaveLength(126);
+    // 120 unconnected kinds plus the MariaDB branch's eight.
+    expect(rows).toHaveLength(128);
 
     const halfDeclared = rows
       .filter((row) => row.kind.sourceLanguage !== undefined && row.kind.hasSource !== true)
@@ -422,10 +425,10 @@ describe("the fleet census of object source declarations", () => {
  * - such a kind on capabilities with no `keyScan`, because then no Keys panel exists to enumerate it.
  *
  * `KEY_BROWSER_KINDS` is the committed expectation, one `<type-id>/<kind id>` per such kind, and the
- * registration of an engine that declares one moves it. etcd's `key` (#1089 4.1) and Oxia's `key` (SB2-7.1) are
- * the two such kinds, and the planted declarations are what show each rule refuses what it names.
+ * registration of an engine that declares one moves it. etcd's `key` (#1089 4.1), Oxia's `key` (SB2-7.1) and S3's
+ * `object` are the three such kinds, and the planted declarations are what show each rule refuses what it names.
  */
-const KEY_BROWSER_KINDS: readonly string[] = Object.freeze(["etcd/key", "oxia/key"]);
+const KEY_BROWSER_KINDS: readonly string[] = Object.freeze(["etcd/key", "oxia/key", "s3/object"]);
 
 /** The breaches of the three conditions above in one declaration, one sentence each. */
 function keyBrowserBreaches(type: string, capabilities: ProviderCapabilities): readonly string[] {
@@ -463,7 +466,7 @@ function keyBrowserBreaches(type: string, capabilities: ProviderCapabilities): r
  * engine that declares it moves the list. The planted declarations, in the key-browser block below so
  * they share its key-browser kind, show each rule refuses what it names.
  */
-const LEVEL_SCAN_TYPES: readonly string[] = Object.freeze([]);
+const LEVEL_SCAN_TYPES: readonly string[] = Object.freeze(["s3"]);
 
 /** The breaches of the level rules in one declaration, one sentence each. */
 function levelBreaches(type: string, capabilities: ProviderCapabilities): readonly string[] {
@@ -583,8 +586,8 @@ describe("the key-browser declaration", () => {
       expect(breaches).toEqual([]);
     });
 
-    // PLANTED declarations, because no engine in the fleet declares levels yet, so without them each rule
-    // would be certified by nothing. `KEY` is the key-browser kind the block above plants.
+    // PLANTED declarations, because each rule's refusal is certified only by a declaration that breaks it, which
+    // S3's real declaration, keeping every rule, cannot be. `KEY` is the key-browser kind the block above plants.
     const BUCKET: ObjectKindSpec = { id: "bucket", role: "config", label: "Bucket", labelPlural: "Buckets" };
     const LEVELS = {
       defaultCount: 500,
@@ -651,6 +654,95 @@ describe("the key-browser declaration", () => {
         "store names keyScan.levels.rootKind on an engine with a container level, and a root kind names the first segment of one key space",
       ]);
     });
+  });
+});
+
+/**
+ * THE WITHHELD-NAMES DECLARATION, held to the preconditions its promise rests on.
+ *
+ * `machineNames: "withheld"` keeps a kind's names out of the agent's grounding walk, and the walk is the only
+ * machine surface the declaration reaches. So it keeps its promise only where no other machine surface lists the
+ * kind: the kind is not a relation, which MCP's `inspect_schema` and the app's schema read list whatever the
+ * declaration says; the engine is not offered to MCP; and the provider has no `queryReadOnly`, the path the agent's
+ * read tool runs a statement through.
+ *
+ * `WITHHELD_KINDS` is the committed expectation, one `<type-id>/<kind id>` per such kind, and the registration of
+ * an engine that declares one moves it.
+ */
+const WITHHELD_KINDS: readonly string[] = Object.freeze([]);
+
+/** The breaches of the three preconditions above in one declaration, one sentence each. */
+function withheldNamesBreaches(
+  type: string,
+  capabilities: ProviderCapabilities,
+  provider: { readonly queryReadOnly?: unknown },
+  mcpExposable: boolean,
+): readonly string[] {
+  const withheld = declaredKinds(capabilities).filter((kind) => kind.machineNames === "withheld");
+  if (withheld.length === 0) return [];
+  const ids = withheld.map((kind) => kind.id).join(", ");
+  const breaches: string[] = [];
+  for (const kind of withheld) {
+    if (kind.role === "relation") {
+      breaches.push(`${type}/${kind.id} withholds its names and is a relation, which the schema surfaces list`);
+    }
+  }
+  if (mcpExposable) {
+    breaches.push(`${type} withholds the names of ${ids} and is offered to MCP`);
+  }
+  if (provider.queryReadOnly !== undefined) {
+    breaches.push(`${type} withholds the names of ${ids} and has queryReadOnly, through which the agent reads it`);
+  }
+  return breaches;
+}
+
+describe("the withheld-names declaration", () => {
+  test("the fleet declares exactly the committed withheld kinds, and no declaration breaches the rules", async () => {
+    const declaring: string[] = [];
+    const breaches: string[] = [];
+    for (const type of CENSUS_TYPES) {
+      const provider = await createDatabaseProvider(CENSUS_CONNECTION[type]);
+      const capabilities = provider.getCapabilities();
+      for (const kind of declaredKinds(capabilities)) {
+        if (kind.machineNames === "withheld") declaring.push(`${type}/${kind.id}`);
+      }
+      breaches.push(...withheldNamesBreaches(type, capabilities, provider, MCP_EXPOSABLE[type]));
+    }
+    expect(declaring).toEqual([...WITHHELD_KINDS]);
+    expect(breaches).toEqual([]);
+  });
+
+  // PLANTED declarations, since no shipped declaration breaks a rule, so each refusal is certified only here.
+  const SECRET: ObjectKindSpec = {
+    id: "secret",
+    role: "config",
+    label: "Secret",
+    labelPlural: "Secrets",
+    machineNames: "withheld",
+  };
+  const declaring = (kinds: readonly ObjectKindSpec[]): ProviderCapabilities =>
+    ({ queryLanguage: "json", containerLevels: [], objectKinds: kinds }) as unknown as ProviderCapabilities;
+
+  test("a withheld config kind on an engine with no other machine path has no breach, the control", () => {
+    expect(withheldNamesBreaches("kv", declaring([SECRET]), {}, false)).toEqual([]);
+  });
+
+  test("a withheld relation is refused by name", () => {
+    expect(withheldNamesBreaches("kv", declaring([{ ...SECRET, role: "relation" }]), {}, false)).toEqual([
+      "kv/secret withholds its names and is a relation, which the schema surfaces list",
+    ]);
+  });
+
+  test("an engine offered to MCP is refused by name", () => {
+    expect(withheldNamesBreaches("kv", declaring([SECRET]), {}, true)).toEqual([
+      "kv withholds the names of secret and is offered to MCP",
+    ]);
+  });
+
+  test("a provider with queryReadOnly is refused by name", () => {
+    expect(withheldNamesBreaches("kv", declaring([SECRET]), { queryReadOnly: () => undefined }, false)).toEqual([
+      "kv withholds the names of secret and has queryReadOnly, through which the agent reads it",
+    ]);
   });
 });
 

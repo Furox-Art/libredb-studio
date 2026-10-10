@@ -5,7 +5,7 @@ This document outlines the architectural patterns, tech stack, and system design
 ## System Overview
 
 LibreDB Studio is a hybrid, cloud-native database management tool that provides an IDE-like experience in the browser.
-It supports **28 database backends** via a Strategy Pattern abstraction: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Trino, Databend, Apache Cassandra, Elasticsearch, OpenSearch, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, LibreDB.
+It supports **29 database backends** via a Strategy Pattern abstraction: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Trino, Databend, Apache Cassandra, Elasticsearch, OpenSearch, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, S3-compatible object storage, LibreDB.
 The count is the `SHIPPED` record in [`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts), which is exhaustive over `DatabaseType`; `elasticsearch` and `opensearch` are two ids served by one provider module, and `influxdb` and `influxdb3` are two ids served by one provider directory with a class each.
 
 It runs in two modes: as a **standalone Next.js app** and as an **embedded npm package** (`@libredb/studio`) consumed by libredb-platform. See [§4.6](#46-workspace-abstraction-npm-package-embedding).
@@ -47,6 +47,7 @@ graph TD
         DBFactory --> Stream[Stream Providers]
         DBFactory --> Graph[Graph Providers]
         DBFactory --> Vector[Vector Providers]
+        DBFactory --> ObjectStore[Object Storage Providers]
 
         SQL --> PG[(PostgreSQL)]
         SQL --> MySQL[(MySQL)]
@@ -73,6 +74,7 @@ graph TD
         Graph --> Neo4j[(Neo4j)]
         Vector --> Milvus[(Milvus)]
         Vector --> Qdrant[(Qdrant)]
+        ObjectStore --> S3[(S3-compatible object storage)]
         DBFactory --> Embedded[Embedded Providers]
         Embedded --> LibreDB[(LibreDB)]
     end
@@ -137,6 +139,7 @@ classDiagram
     BaseDatabaseProvider <|-- GraphBaseProvider
     BaseDatabaseProvider <|-- MilvusProvider
     BaseDatabaseProvider <|-- QdrantProvider
+    BaseDatabaseProvider <|-- S3Provider
     BaseDatabaseProvider <|-- LibreDBProvider
 
     SQLBaseProvider <|-- PostgresProvider
@@ -167,7 +170,7 @@ A graph engine is the one family with a shared base of its own: `GraphBaseProvid
 The graph core under `src/lib/db/graph/` is pure and shipped to the browser, where the editor's Cypher language and completion read it; `bolt/` and the base class are server only.
 [`ADDING_A_PROVIDER.md`](./ADDING_A_PROVIDER.md#adding-a-graph-engine) describes the layers and the profile, and [`providers/neo4j.md`](./providers/neo4j.md) the one engine on them.
 
-Adding a new database type requires: **1 provider class** + **1 entry in `db-ui-config.ts`**.
+Adding a new database type takes several steps, from registering the type to verifying it; [`ADDING_A_PROVIDER.md`](./ADDING_A_PROVIDER.md) walks through each one.
 
 `CouchbaseProvider` extends `BaseDatabaseProvider` even though SQL++ is a SQL dialect: SQL++ quotes identifiers with doubled backticks, which `escapeIdentifier()` produces for no existing type, so it owns its quoting and declares its SQL-ness through `queryLanguage: 'sql'` instead. Being reached over HTTP is **not** the reason — `ClickHouseProvider`, `DruidProvider` and `TrinoProvider` add no driver either, and all three extend `SQLBaseProvider`, because double-quoted identifiers are correct in each dialect. Each driver-free provider is a directory rather than a single file, with its wire format behind a transport seam that provider logic never bypasses. Trino inherits everything except the limiter: its grammar is `[ OFFSET count ] [ LIMIT count ]` and only that way round, so `prepareQuery()` transposes the clause the shared limiter emits. See [`docs/providers/couchbase.md`](providers/couchbase.md), [`clickhouse.md`](providers/clickhouse.md), [`druid.md`](providers/druid.md) and [`trino.md`](providers/trino.md).
 
@@ -183,6 +186,7 @@ No `isMongoDB` / `=== 'mongodb'` checks outside provider classes. All behavior d
 
 `src/lib/db/object-kinds.ts` is the kernel through which every provider reads its own declaration, and it takes only facts that follow from the declaration and hold for every engine.
 How deep the container chain is (`containerDepth()`), which container paths are an address (`acceptedContainerShapes()`, over `containerPathShapes`) and which object kinds exist (`declaredKinds()`) are such facts.
+So is which kinds one container holds (`applicableKinds()`, over `Container.kinds`, and `kindsForContainer()`, its form over every enumerable kind): the tree, the tree filter, the inventory and search routes and the agent's grounding walk ask a container only for those.
 The HTTP object routes read them through the same functions, so a route refusal and a provider refusal cannot disagree about one declaration (#1147).
 A rule that only one engine's reads need stays in that engine's file, next to the reads it protects.
 PostgreSQL's `containerSchema()` is the example: it refuses a declaration that names no `schema` level, because the PostgreSQL reads look the schema up by id, so it lives beside those reads rather than in the kernel (#1092).
@@ -192,7 +196,7 @@ A descriptor field that only one engine sets is a sign that its rule belongs in 
 The editor's query dialects follow the same rule through three registries, each a `Record` the compiler holds complete.
 `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`) gives each declared `queryDialect` its tab type and its three row-menu answers.
 `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`) gives each tab type its Monaco language and its formatter, keyed by tab type because that is what a restored tab carries.
-`DIALECT_GENERATORS` (`src/lib/query-generators.ts`) gives each dialect what a tree click and Generate Query write.
+`DIALECT_GENERATORS` (`src/lib/query-generators.ts`) gives each dialect what a tree click and Generate Query write, and, for a provider that declares `rowActions`, what each declared row action runs.
 A dialect is one record in each, and no reader branches on its name: `tests/unit/lib/dialect-reader-allowlist.test.ts` holds every other reader of `queryDialect`, of the JSON language and of a negated language to a closed list with its owner.
 
 ### 4.2. Authentication Flow
@@ -342,13 +346,13 @@ src/
 │   ├── results-grid/        # ResultCard, RowDetailSheet, StatsBar
 │   ├── admin/               # AdminDashboard shell (section routes) + tabs/ panels
 │   ├── monitoring/          # MonitoringDashboard + tabs
-│   ├── object-tree/         # The desktop sidebar's lazy object tree (containers, folders, objects, columns)
+│   ├── object-tree/         # The desktop sidebar's lazy object tree (containers, kind groups, folders, objects, columns)
 │   │   ├── ObjectTree.tsx    # Tree shell: hand-rolled window, roving tabindex, keyboard, menu anchor
 │   │   ├── TreeRow.tsx       # One row, ARIA numbers taken verbatim; the chevron is its own hit target
 │   │   ├── RowMenu.tsx       # The row menu, rendered as a sibling of the tree element, not inside it
 │   │   ├── flatten.ts        # Expansion state to a flat row list, with each row's ARIA position (pure)
 │   │   ├── use-tree-nodes.ts # The lazy cache: containers, counts, a folder's objects, a row's columns
-│   │   ├── row-actions.ts    # What a row may be asked to do, read off the kind's own declaration
+│   │   ├── row-actions.ts    # What a row may be asked to do, read off the kind's own declaration and the declared row actions
 │   │   └── index.ts          # What a shell imports: ObjectTree plus the two types its handlers need
 │   ├── schema-explorer/     # SchemaExplorer (the flat list: mobile schema tab, published export)
 │   └── ui/                  # Shadcn/UI primitives
@@ -367,6 +371,7 @@ src/
     │   │   ├── stream/      # kafka/ (read-client seam + JSON read requests over the Kafka protocol via @platformatic/kafka)
     │   │   ├── graph/       # neo4j/ (an engine profile, catalog, statement gate and monitoring on the graph layer below)
     │   │   ├── vector/      # milvus/ (a gRPC client of its own via the shared gRPC transport, Milvus's REST v2 requests as the console, run over gRPC); qdrant/ (a REST client of its own over the shared node transport, the closed console, the payload sample)
+    │   │   ├── objectstore/ # s3/ (a REST client of its own over the shared byte transport, signed by its own SigV4 module over node:crypto; an AWS CLI read-command console; object metadata and capped previews, Parquet through hyparquet)
     │   │   └── embedded/    # libredb (built-in embedded provider for the sample connection)
     │   ├── graph/           # The graph layer a Cypher-over-Bolt engine extends (docs/ADDING_A_PROVIDER.md, "Adding a graph engine"):
     │   │                    #   cypher/ (lexer, statements, quoting, read policy, generators), objects.ts, values.ts and
@@ -385,7 +390,7 @@ src/
     │                        #   verifier (jose, HS256 pinned) and the in-process jti replay cache
     ├── llm/                 # LLM provider module
     ├── editor/              # Monaco completions (SQL + MongoDB), the tab-type/language ladder, the
-    │                       # editor registry (dialect-editors.ts), the LibreDB, Redis, etcd and Oxia command languages, Cypher, InfluxQL, and the Milvus and Qdrant console languages
+    │                       # editor registry (dialect-editors.ts), the LibreDB, Redis, etcd, Oxia and S3 command languages, Cypher, InfluxQL, and the Milvus and Qdrant console languages
     ├── schema-diff/         # Diff engine + migration SQL generator
     ├── export/              # The writers behind every "save this to disk": RFC 4180 CSV,
     │                        #   the SQL INSERT/DDL forms, and the one blob-download path
@@ -412,4 +417,4 @@ src/
 - **Native channels** (`bin/studio.js` npx launcher, Homebrew tap, `.deb`/`.rpm`, Snap, standalone tarballs; sources under `bin/` and `packaging/`): local-first, bind `127.0.0.1` by default unless `--host` or `LIBREDB_BIND` opts in, or a `HOSTNAME` that differs from the machine's own name does (`resolveBindAddress`, #813: an inherited value is what a shell or a container runtime exported, not a choice). The npx launcher ships as a pure library and downloads the SHA256-verified standalone server tarball from GitHub Releases. Full matrix and per-channel details in [`docs/DISTRIBUTION.md`](DISTRIBUTION.md).
 - **Health Check**: `GET /health`, `GET /api/health` or `GET /api/db/health` — same answer, no dependencies
 - **Stateless API**: API routes are stateless, suitable for horizontal scaling
-- **Environment**: Configured via `.env.local` (see CLAUDE.md for full variable list). Missing auth secrets are generated on first standalone boot — see [§4.7](#47-standalone-boot-flow-srcinstrumentationts).
+- **Environment**: Configured via `.env.local` (see [`.env.example`](../.env.example) for the full variable list, with an example for each). Missing auth secrets are generated on first standalone boot — see [§4.7](#47-standalone-boot-flow-srcinstrumentationts).

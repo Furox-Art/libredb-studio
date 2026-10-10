@@ -19,7 +19,7 @@ Three decisions. The first is the consequential one, which is why it is first.
 
 1. **Does it need a driver at all?** Score the engine against the rubric below. A database with a
    first-class HTTP API can be supported with no dependency at all, and that is worth real effort to
-   establish before you start. Thirteen shipped type-ids need no driver: SQLite uses the built-in
+   establish before you start. Fourteen shipped type-ids need no driver: SQLite uses the built-in
    `bun:sqlite`/`node:sqlite` via `sqlite-driver.ts`, and the rest reach the engine over HTTP with
    nothing but `fetch`/`node:https`. Couchbase goes over the documented REST endpoints
    ([couchbase.md](./providers/couchbase.md)), ClickHouse over its HTTP interface
@@ -31,7 +31,8 @@ Three decisions. The first is the consequential one, which is why it is first.
    HTTP API, `/api/v1/*` ([prometheus.md](./providers/prometheus.md)), Qdrant over its REST API
    ([qdrant.md](./providers/qdrant.md)), InfluxDB and InfluxDB 3 over the v1 `/query` API and
    `/api/v3/query_sql` ([influxdb.md](./providers/influxdb.md) · [influxdb3.md](./providers/influxdb3.md)),
-   and Databend over its own HTTP query API, `POST /v1/query` ([databend.md](./providers/databend.md)).
+   Databend over its own HTTP query API, `POST /v1/query` ([databend.md](./providers/databend.md)),
+   and S3-compatible object storage over the S3 REST API, signed by Studio's own SigV4 code ([s3.md](./providers/s3.md)).
    If it does need one, it will be something like `pg`, `mysql2`, `mongodb`, `ioredis`, `oracledb`,
    `mssql` or `db2-node`.
 
@@ -97,7 +98,7 @@ Score a candidate before writing code. Each criterion you fail becomes code you 
 | 3 | **Is there catalog introspection over the same surface?** | Otherwise the object surface has nothing to read |
 | 4 | **Is there monitoring data over the same surface?** | Decides how much of the monitoring panel is real rather than honestly empty |
 | 5 | **Is there an EXPLAIN?** | Decides `supportsExplain` and whether a strategy is needed |
-| 6 | **How complex is auth?** | Basic auth is three lines. SigV4, OAuth2 refresh or Kerberos is a library — and that is usually where the no-dependency promise ends |
+| 6 | **How complex is auth?** | Basic auth is three lines. SigV4, OAuth2 refresh or Kerberos is a library, and that is usually where the no-dependency promise ends. S3 shows it need not: its SigV4 is Studio's own `node:crypto` code, tested on the AWS suite vectors |
 | 7 | **Does the data model map onto containers, kinds and objects, and is an outer container level alone a real address?** | The object surface addresses an object by a path of segments, so a hierarchy is declared through `containerLevels` and `objectKinds` rather than flattened into a display name. Then choose `containerPathShapes` and declare it in `getCapabilities()`: `exact` when only the declared depth is an address (a PostgreSQL schema, a MongoDB database), `prefixes` when the outer levels alone are one too (a Trino catalog with no schema, a Couchbase bucket with no scope). An absent field reads as `exact`, and the provider's own check and the HTTP object routes both refuse by that one declaration through `acceptedContainerShapes()` in `src/lib/db/object-kinds.ts` |
 
 A good sanity check for criterion 1: **can a browser talk to it?** Couchbase's own Web Console and
@@ -136,6 +137,7 @@ Besides `contentType`, `contentEncoding` and `retryAfter`, it returns only the r
 A `signer` is called once per request just before it is written, with the exact method, Host, path, query and headers, and adds only the header names it lists.
 Its connection headers meet the rule a request's own headers meet, so `authorization` comes from the signer alone.
 It never reaches a link-local address or AWS's IPv6 instance metadata address, whatever `DB_HTTP_BLOCK_PRIVATE_HOSTS` says.
+`createNodeTransport` takes both of the byte transport's refusals on request, each off when absent: `refusesLinkLocal: true` keeps a text transport off those addresses the same way, a literal when the transport is built and a DNS answer at the lookup, and `refusesUpgrade: true` fails a 101 answer at once instead of leaving the request to its deadline.
 The older HTTP providers keep their own transports until D37 in [`BACKLOG.md`](BACKLOG.md) moves them.
 
 **Send gRPC calls through the shared gRPC transport.**
@@ -235,10 +237,10 @@ The Memgraph provider is filed as `docs/BACKLOG.md` D141.
 
 ```typescript
 // Before:
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3';
 
 // After (example: adding CockroachDB):
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 'cockroachdb';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3' | 'cockroachdb';
 ```
 
 A type-id may contain a digit: `db2` does.
@@ -510,6 +512,12 @@ An entry is a `pair` (a published default user and password), a `jwt` (a token t
 The dialog draws a `pair` or `jwt` warning beside the password before Test Connection, and blocks nothing.
 The seed loader refuses a `readOnly: true` seed whose literal credential matches a `pair` entry, or that has no password where the type declares `no-secret`, and the provider runs `readOnlySeedRefusal` on a seed connection once its references resolve, before it dials.
 Add a test that the real record declares each entry you add.
+
+`connectionImport`, a third optional declaration, offers an import in the dialog: a `label` for its action and a `load` that resolves to the parser, a function from the pasted text to `{ contexts, refusals }` (`src/lib/connection-import.ts`).
+The dialog loads the parser only when the import opens, offers it only for a new connection, and fills the form from the entry the user picks through `applyImported`, which refuses an entry that names a field the type does not take or an SSL / TLS setting the dialog does not draw for the type and mode, and never takes the consent to send a password without TLS.
+The import keeps the user's choices about how to connect (read-only, the object scan and the query timeout) and resets every server-scoped field before it fills.
+The parser runs in the browser: it imports no `node:` module and no provider, never throws, and never keeps or prints a parser error, which can quote a credential.
+A declaring type is listed in `DECLARING` in `tests/unit/lib/connection-import-declaration.test.ts`.
 
 ## Step 5: Install the Driver
 
@@ -808,6 +816,8 @@ Every field and what it controls:
 | `implicitCommitExceptions` | `readonly string[]?` | Word sequences an `implicitCommitStatements` entry would match that do NOT end the transaction (Oracle's `ALTER SESSION`, MySQL's `CREATE TEMPORARY`). Read only together with that list |
 | `declaresForeignKeys` | `boolean?` | Whether this engine has foreign keys in its model at all. `false` says an empty foreign-key list means "no such constraint exists here", not "this schema declares none" — set it on every engine without referential constraints. Optional for the published-interface reason above; consumers gate on `=== false`, so an absent flag reads as "may declare them" |
 | `tablesAreDerivedGroupings` | `boolean?` | Whether the relation-shaped rows of this provider are objects the engine holds, or groupings this server derived from a bounded scan. `true` on Redis, LibreDB and etcd only. Where it is true the schema explorer hides the items that *address* the row, `Profile Table`, `Generate Count Query` and both per-row maintenance items, all of which name the row to a route that needs a real object, and keeps the ones that merely name it (`Select`, `Generate`, `Copy Name`, `Generate Code`). It does not gate `Generate Test Data`: since #1085 (decision D-M) both row menus offer that item only where the kind of the row declares `acceptsRowWrites` and the engine declares `supportsTestDataGeneration` (`offersTestDataGeneration`, #1468). With `keyScan` beside it, it is also one half of the gate on `Browse Keys`, the row-menu item that opens the key-space panel with the row's own name as its pattern: a glob under `keyScan.pattern: "glob"` and a bare prefix under `"prefix"`: a prefix is only a glob on an engine whose rows are prefixes. The agent layer states it to a plan run in one sentence. Browse Keys is also offered on rows of `keyScan.levels.rootKind`, handing the panel `<name><separator>`, on an engine with no container level. Consumers gate on `=== true`, so an absent flag reads as "ordinary objects" |
+| `containersNameKinds` | `true?` | Whether this engine's containers answer `Container.kinds`, the kinds each one holds, from `listContainers`. Declare it with that answer: the object-surface conformance refuses a container naming its kinds on an engine that does not. The inventory route then reads the kinds of the containers a body names with one container listing per distinct parent, and refuses a named container that listing does not hold. Absent: named containers are read for every kind with no listing |
+| `rowActions` | `KindRowAction[]?` | The row-menu items this engine offers on objects of named kinds, each `{ id, label, kinds }`, in menu order: Describe on every kind, Logs on one. Gated in `src/components/object-tree/row-actions.ts` by this declaration alone, through `rowActionsForKind()` in `src/lib/db/object-kinds.ts`, and offered after every other item. Choosing one opens a new tab and runs what the dialect's `DialectGenerators.rowAction` writes for that object, with its kind on `GeneratorScope.kind` (`generateRowActionQuery` in `src/lib/query-generators.ts`), every time, so running two actions on one object opens two tabs. Declare it only with that generator: `generateRowActionQuery` raises for a dialect that has none. A row action reads and never writes, because it runs on click with no role asked and no editing step, and it honours `GeneratorScope.readOnly`. Every path segment is an object name taken from a listing, so the generator quotes it by the dialect's own quoting rule and never concatenates it. Absent offers nothing |
 | `enforcesReadOnly` | `true?` | Whether this provider refuses every write, object edit and maintenance operation before any request while the connection's `readOnly` is true, or while it was opened with `ProviderExecutionContext.readOnly`, naming the read-only mode in the refusal. Nothing under `src/` reads the field: the seed schema, `assertReadOnlyHonoured` in `factory.ts` and the connection form decide before a provider exists, so they read `READ_ONLY_ENFORCED` in `src/lib/db/compatibility.ts`, and `tests/unit/db/read-only-enforced-capability.test.ts` holds that map equal to this declaration for every type-id. Only the literal `true` is declared, so an absent flag reads as "a read-only connection is refused here" (#1089) |
 | `readsFileAccessPosture` | `true?` | Whether this provider opens its editor handle under the server-derived file-access posture, `ProviderExecutionContext.allowExternalFileAccess` (only DuckDB does, opening a denied handle with `enable_external_access: 'false'`); nothing under `src/` reads the field, because `providerCacheKey` and `findOpenSingleWriterProvider` key and lend handles by posture from `READS_FILE_ACCESS_POSTURE` in `src/lib/db/compatibility.ts`, which `tests/unit/db/reads-file-access-posture-capability.test.ts` holds equal to this declaration for every type-id, so an engine that starts reading the posture sets both, and only the literal `true` is declared, so an absent flag reads as "every editor handle opens alike" |
 | `resumesBilledCompute` | `true?` | Whether a request to this connection can resume compute the engine bills for, such as a suspended Databend Cloud warehouse. Where it is true Studio sends the connection no connection pulse (the header shows "not checked") and no admin fleet health check (the row answers `not-checked`), and the monitoring auto-refresh toggle carries a sentence saying each refresh keeps the billed compute running; auto-refresh stays off until the user starts it, as it does for every provider, and then polls on its timer. A request the user makes still runs and still resumes the compute. Read from an unconnected provider, so it answers before any connect. `tests/unit/db/resumes-billed-compute-capability.test.ts` holds every shipped provider without it until an engine that bills a resume declares it. Only the literal `true` is declared, so an absent flag reads as "a request costs nothing to send" |
@@ -880,7 +890,7 @@ For the authoritative, code-verified reference for each shipped provider (extend
 driver, pooling, capabilities, labels, `prepareQuery` behaviour, and limitations), see the prime
 docs — they are the single source of truth and are kept in sync with the code:
 
-**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · databend · libredb
+**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · databend · s3 · libredb
 
 When implementing a new provider, the closest existing analogue is the best template: a pooled SQL
 provider (postgres/mysql), an embedded SQL provider (sqlite), a non-SQL provider (mongodb/redis), a
@@ -1003,7 +1013,8 @@ The integration points, all of which need an entry. This is the list the Strateg
 - [ ] `package.json` — the driver, **if** it needs one. A driver-free provider leaves it untouched, and
       fifteen shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
       `libsql`, `sqlite`, `prometheus`, `qdrant`, `milvus`, `influxdb`, `influxdb3`, `oxia` and `databend`
-      each add nothing here (`milvus` and `oxia` only extend the `//dependencies` note)
+      each add nothing here (`milvus` and `oxia` only extend the `//dependencies` note).
+      `s3` needs no driver but adds the Parquet decoders `hyparquet` and `hyparquet-compressors`, with their `//dependencies` note.
 - [ ] `database-compose.yml` — a service, so the next person can repeat the live pass. A distributed
       engine contributes a `profiles: [...]` set instead, as Druid's seven services do, so the default
       stack does not grow for everyone. An EMBEDDED engine gets no service at all — SQLite, DuckDB and
@@ -1042,12 +1053,15 @@ Those three reach code and tests only; the four prose greps of the published blo
 - [ ] The `<!-- engines:N -->` marker of `deploy/aws/listing/listing-fields.md`, which `tests/unit/aws-listing-fields.test.ts` counts against `EXTERNAL_DATABASE_TYPES`.
 - [ ] An E2E spec that drives Test Connection runs on the second Playwright server: add it to `SECOND_SERVER_SPECS` in `tests/unit/e2e-project-servers.test.ts`, to the `chromium` project's `testIgnore`, and to a project of its own on `offlinePort` in `playwright.config.ts`.
 - [ ] The identity colour: `src/styles/theme.css` declares a finite set of hues, `tests/unit/lib/db-ui-config.test.ts` requires every engine's colour to differ, and a second step of a used hue must pass the separation test of `tests/unit/theme-accent-contrast.test.ts` by joining `IDENTITY_ALTS`, or be a new token with its theme and contrast entries.
+- [ ] An engine whose containers hold different kinds (a cluster's cluster-scoped and namespaced kinds) declares `containersNameKinds`, answers `Container.kinds` from `listContainers`, answers `countObjects` for exactly the kinds that apply to the container, refuses an inapplicable container and kind pair in `listObjects` with a sentence rather than an empty list, and runs `assertObjectSurface` in one container of each shape; the tree, the inventory and search routes and the agent's grounding walk read it through `applicableKinds()`. Kinds that read better in folders declare `ObjectKindSpec.group`, which the tree draws only where two or more of a group's kinds apply to a container.
 - [ ] A read-write key-value engine may need the declarations etcd added: `ObjectKindSpec.enumeratedBy` and `countIsListing`, the `KeyScanCapability` shape fields, `READ_ONLY_ENFORCED`, `MCP_EXPOSABLE`, a declared maintenance card (`title`, `description`, `confirmation`), and a vocabulary row with `typedConfirmation` and `safetyAnalysis`; each is read by one helper and every existing engine's answer stays unchanged.
+- [ ] An engine whose object names are sensitive, or whose containers are too many to walk, may declare `ObjectKindSpec.machineNames: "withheld"` (the agent's grounding walk counts the kind and lists none of it) and `agentWalkScope` (the walk reads the session-default container and the ones it names, and says how many it left out); `docs/AGENT.md` describes both, and every other engine's walk is unchanged.
 
 **For a JSON dialect**, a reader keyed on `"json"` alone treats the text as MongoDB (#427), so the dialect is one record in each of three registries, and the build fails until all three exist:
 
 - [ ] `src/lib/db/query-dialects.ts`: a record in `QUERY_DIALECTS`, the dialect's tab type and its answers for the row menus' `offersColumnProfiling`, `offersCodeGeneration` and `offersCountQuery`.
       Profiling reads a dialect only beside `"json"`, while the count reads any declared dialect.
+      A console whose grammar takes credential flags declares them as `historyMask` on the record, so query history stores their values masked (`src/lib/history-mask.ts`).
 - [ ] `src/lib/editor/dialect-editors.ts`: a record in `DIALECT_EDITORS` for the dialect's tab type, the Monaco language it renders in and its formatter, if it has one.
       Tab types that render in one Monaco language share its formatter, which `tests/unit/editor/dialect-editors.test.ts` holds.
 - [ ] `src/lib/query-generators.ts`: a record in `DIALECT_GENERATORS`, what a tree click and Generate Query write, read before the `json` arm, or a tree click auto-executes a MongoDB document.
@@ -1102,6 +1116,8 @@ Those three reach code and tests only; the four prose greps of the published blo
       Declare them there rather than adding a type test to `src/components/ConnectionModal.tsx`, which already carries five (`docs/BACKLOG.md` U36).
 - [ ] `src/lib/db-ui-config.ts`: `hostAcceptsUri`, when the engine's documentation gives its endpoint as an `http://` or `https://` address; and the type's row of `CREDENTIAL_WARNINGS` in `src/lib/db/credential-warnings.ts`, which the entry's `credentialWarnings` reads by reference, when the engine ships a default credential, accepts no secret, or takes a token whose claims say how far it reaches.
       Each needs a test that the real record declares it, and a declared `pair` or `no-secret` entry needs the provider's own `readOnlySeedRefusal` check in `connect()` for a seed connection.
+- [ ] `src/lib/db-ui-config.ts`: `connectionImport`, when users keep this engine's connections in a file of their own, such as a client configuration file.
+      Its parser module stays browser-side, and the type joins `DECLARING` in `tests/unit/lib/connection-import-declaration.test.ts`.
 
 **Published where a human reads it, and this is the block with the fewest gates.** `readme:check`
 compares the translated READMEs against `README.md` and `chart:check` compares versions. The catalog

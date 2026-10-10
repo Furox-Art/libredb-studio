@@ -27,12 +27,12 @@
 
 ## Overview
 
-LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia and Databend.
+LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend and S3-compatible object storage.
 
 ### Key Features
 
 - **JWT Authentication** - Secure token-based authentication stored in HTTP-only cookies
-- **Multi-Database Support** - Twenty-seven engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend
+- **Multi-Database Support** - Twenty-eight engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, S3-compatible object storage
 - **AI-Powered Insights** - EXPLAIN explanations, query-safety analysis and schema docs, streamed
 - **Real-time Health Monitoring** - Database metrics and performance insights
 
@@ -463,7 +463,7 @@ Under that cap, a result of exactly `limit` rows has `wasLimited: false` and `ha
 A bound the provider reported sets `wasLimited` and never `hasMore`, because no `offset` can advance a bound the server did not write.
 A statement the server returned **untouched** — one carrying its own `LIMIT n`, or one whose end the limiter declined to cut into — runs identically at every `offset`, because the requested offset is discarded along with the rewrite. `hasMore` is `false` for those however many rows come back, and re-requesting with a higher `offset` would return the same rows again. Where `hasMore` is `true`, re-request with `offset` advanced by the number of rows you received. See [`docs/editor/query-optimization.md`](editor/query-optimization.md).
 
-Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis, LibreDB, Prometheus, InfluxDB (InfluxQL), Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia ignore it. `POST /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
+Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis, LibreDB, Prometheus, InfluxDB (InfluxQL), Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia and S3-compatible object storage ignore it. `POST /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
 
 **The database a run reads (optional):**
 ```json
@@ -488,14 +488,14 @@ ordinary case and the one every statement other than a key read sends.
 
 The field is accepted only where the provider declares `keyScan` and a container level to name, which is Redis: a Redis key space belongs to one numbered database, and a run cannot name that database in its statement.
 On an engine that declares no walk it would be a per-run override of an operator-pinned `database` with no walk to justify it, so it is refused rather than quietly honoured.
-etcd and Oxia declare the walk and no container level, because one connection is one key space (one etcd cluster, one Oxia namespace), so they refuse the field as well.
+etcd, Oxia and S3-compatible object storage declare the walk and no container level, because one connection is one key space (one etcd cluster, one Oxia namespace, one S3 endpoint), so they refuse the field as well.
 The declaration is read without connecting, so each refusal costs no socket, and an unreachable host still answers 400:
 
 | Condition | Status | Body |
 |-----------|--------|------|
 | `database` present and not a non-negative integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` — the same sentence `POST /api/db/keys/scan` refuses with, shared in `optionalDatabase` |
 | The provider declares no `keyScan` | `400` | `{ "error": "<type> declares no key-space walk: \"database\" names the database a key was walked in, and only an engine that needs such a name accepts it" }` |
-| The provider declares `keyScan` and no container level (etcd, Oxia) | `400` | `{ "error": "<type> walks one key space and declares no database level: \"database\" names the numbered database a key was walked in, and this engine has none to name" }` |
+| The provider declares `keyScan` and no container level (etcd, Oxia, S3-compatible object storage) | `400` | `{ "error": "<type> walks one key space and declares no database level: \"database\" names the numbered database a key was walked in, and this engine has none to name" }` |
 | The server has no such database | `400` | `{ "error": "Redis refused database <n>: ERR DB index is out of range", "code": "QUERY_ERROR", "statusCode": 400 }`, never a read of database 0 |
 
 **A connection type's console text bound:**
@@ -510,7 +510,7 @@ The bound is read after the request body is parsed, because the type that select
 | `sql` is not a string | `400` | `{ "error": "sql must be a string" }` |
 
 `POST /api/db/multi-query` refuses every connection whose type declares such a bound with `400 { "error": "This connection type runs one statement per request: send it to POST /api/db/query, because this route would split its text into several requests." }`, before it splits anything.
-Milvus and Qdrant each declare a bound of 1,048,576 bytes and InfluxDB (InfluxQL) and Oxia one of 65,536 bytes each, and no other shipped engine declares one, so neither answer changes anything for a connection of another type.
+Milvus and Qdrant each declare a bound of 1,048,576 bytes and InfluxDB (InfluxQL), Oxia and S3-compatible object storage one of 65,536 bytes each, and no other shipped engine declares one, so neither answer changes anything for a connection of another type.
 
 **Bound parameters (optional):**
 ```json
@@ -1186,6 +1186,29 @@ Only a deeper parent is refused, at `400` with `{ "error": "<type> declares a co
 
 A caller that reaches a provider without these routes, such as the MCP `inspect-schema` tool or a host behind the embedded workspace, is refused by the provider itself under the same rule, in the provider's own words: `A PostgreSQL container path is [schema], received []`.
 
+#### Kinds per container on the object routes
+
+A container in the answer of `POST /api/db/objects/containers` may carry `kinds`, the ids of the object kinds it holds, when it does not hold every kind the engine declares.
+A container without the field holds every kind, which is every container of every engine that does not declare it.
+
+`POST /api/db/objects/inventory` and `POST /api/db/objects/search` list each container only for the kinds it holds, and a `kinds` filter in the body is narrowed the same way, container by container.
+For containers named in `containers`, an engine whose containers carry `kinds` is asked for them with one container listing per distinct parent, one call on an engine with one container level, and a named container that listing does not hold is refused before any listing; every other engine reads named containers for every kind with no container listing, as before.
+Repeated paths in `containers` are read once.
+A body whose named containers sit under more parents than the inventory's pair bound of 1,000 is refused before any listing, and the refusal of unlisted containers names the first five and counts the rest.
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| a named container the listing does not hold, on an engine whose containers carry `kinds` | `400` | `{ "error": "\"containers\" names [[\"shop\"]], which the provider's container listing does not hold, so the kinds held there are unknown; name containers the containers route lists" }` |
+| named containers under more than 1,000 parents, on an engine whose containers carry `kinds` | `400` | `{ "error": "\"containers\" names containers under 1001 parents, and the kinds each holds take one container listing per parent, more than the 1000 one inventory may issue; name fewer containers" }` |
+
+A search is refused before its first listing when the container and kind pairs it would list exceed the inventory's pair bound of 1,000:
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| more than 1,000 container and kind pairs | `400` | `{ "error": "this search would list <n> container and kind pairs, more than the 1000 one search may list; name fewer kinds in \"kinds\"" }` |
+
+Naming fewer kinds brings the search under the bound; a search under it still answers every match.
+
 #### POST /api/db/objects/describe
 
 Read the columns, indexes and foreign keys of ONE object.
@@ -1271,7 +1294,7 @@ Build a plan for an edited object definition, and answer what an apply would sen
 It executes nothing and writes nothing.
 
 The describe route above is the one Phase 2 sibling documented in full in this file.
-The other six under `/api/db/objects/` (`containers`, `counts`, `list`, `search`, `inventory`, `source`) are not, except for the container-path rule four of them share, which [Container paths on the object routes](#container-paths-on-the-object-routes) documents.
+The other six under `/api/db/objects/` (`containers`, `counts`, `list`, `search`, `inventory`, `source`) are not, except for the container-path rule four of them share, which [Container paths on the object routes](#container-paths-on-the-object-routes) documents, and the per-container kinds three of them read, which [Kinds per container on the object routes](#kinds-per-container-on-the-object-routes) documents.
 
 **Authentication:** Required.
 There is NO admin gate on either route, and the reason is measured rather than preferred: a
@@ -1407,6 +1430,7 @@ a route of its own rather than an option on the object routes.
 The walk is offered by an engine that declares `keyScan` in `POST /api/db/provider-meta`'s
 `capabilities`; Redis declares `{ "defaultCount": 500, "maxCount": 1000 }`.
 etcd declares its own counts ([providers/etcd.md](./providers/etcd.md), section 6.4), and Oxia declares `{ "defaultCount": 500, "maxCount": 1000 }` ([providers/oxia.md](./providers/oxia.md), section 6.4).
+S3-compatible object storage declares `{ "defaultCount": 500, "maxCount": 1000 }` ([providers/s3.md](./providers/s3.md), section 6.4).
 Every other connection answers `400`, in this route's own words. A provider that declares the capability and implements no
 walk is a distinct `500` rather than a crash: `ProviderCapabilities` is published, so that is a state
 an external implementer can genuinely be in.
@@ -1420,6 +1444,7 @@ A `levels` declaration needs `pattern: "prefix"` and `totalScope: "none"`, and a
 Its `separator` is one UTF-16 code unit long, such as `/`: an empty one is found in every key, and a longer one can overlap itself or be cut by a pattern that ends inside it, so the panel could draw an entry below the level the route judged it in.
 The route does not check the separator's length; every provider in this repository is held to it by a test of its declaration.
 `levels.rootKind`, when present, names the object kind whose rows name the key space's first segment; the row menu offers Browse Keys on those rows and opens the panel on `<name><separator>`, on an engine with no container level.
+S3-compatible object storage declares `"/"`, `"opaque"`, `"prefix"` and `"none"` too, with `levels.rootKind` `"bucket"`: one folder level at a time, a cursor only it can read, a literal prefix, and no count.
 
 **Authentication:** Required.
 No admin gate, for the same reason the object routes have none: the role decides which connection may
@@ -2117,7 +2142,7 @@ The object is one shape on the wire. Fields the server reads from a request body
 change how a connection is opened — are the coordinates and credentials (`id`, `name`, `type`,
 `host`, `port`, `user`, `password`, `database`, `schema`, `connectionString`), plus `ssl`,
 `sshTunnel`, `serviceName` (Oracle), `instanceName` (MSSQL), `localDataCenter` (Cassandra),
-`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend), `dataServers` (Oxia), `warehouse` (Databend), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
+`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend, S3), `dataServers` (Oxia), `warehouse` (Databend), `region` (S3), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
 (Elasticsearch, #708), and `readOnly` (#1089). `color`, `environment`, `group`,
 `managed`, `seedId`, and `createdAt` are client-side bookkeeping that travel in the same object.
 
@@ -2130,7 +2155,7 @@ interface DatabaseConnection {
   port?: number;           // Port number
   user?: string;           // Username
   password?: string;       // Password
-  database?: string;       // Database name (Couchbase: the bucket; Druid: unused, it has one catalog; Trino: the CATALOG; Cassandra: the KEYSPACE)
+  database?: string;       // Database name (Couchbase: the bucket; Druid: unused, it has one catalog; Trino: the CATALOG; Cassandra: the KEYSPACE; S3: the optional pinned bucket)
   schema?: string;         // Trino: session schema for unqualified table names
   connectionString?: string; // Full connection string (alternative; Druid has no URI form, host + port only; Cassandra has none either, no URI carries localDataCenter)
   queryTimeout?: number;  // Query timeout in milliseconds; omitted uses 60000 (60 seconds)
@@ -2145,9 +2170,10 @@ interface DatabaseConnection {
   localDataCenter?: string; // Cassandra only, and REQUIRED there: the driver refuses to connect without it (`datacenter1` on a stock single node)
   authSource?: string; // MongoDB only: the database the credentials live in (`?authSource=admin`). Not the database being opened - without it the driver checks the user against that one, which fails as a credentials error
   saslMechanism?: 'PLAIN' | 'SCRAM-SHA-256' | 'SCRAM-SHA-512'; // Kafka only: the SASL mechanism that checks user and password, absent meaning none. A user or password with no mechanism is refused, and every mechanism requires TLS
-  allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia and Databend (#786): connect with no TLS although the password (Db2, Databend), the password or token (InfluxDB) or the token (Oxia) then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS, both InfluxDB providers one that sends its secret with no TLS to a host that is not loopback, the Oxia provider one that sends a token with no TLS to a host that is not this machine (docs/providers/oxia.md section 4.6), and the Databend provider one that sends its password with no TLS to a host that is not loopback
+  allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia, Databend and S3 (#786): connect with no TLS although the password (Db2, Databend), the password or token (InfluxDB) or the token (Oxia) then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS, both InfluxDB providers one that sends its secret with no TLS to a host that is not loopback, the Oxia provider one that sends a token with no TLS to a host that is not this machine (docs/providers/oxia.md section 4.6), and the Databend provider one that sends its password with no TLS to a host that is not loopback, and the S3 provider one that connects over plain HTTP to a host that is not loopback, signed or not
   dataServers?: string; // Oxia only: a cluster's data-server addresses, host:port entries separated by commas or whitespace, at most 64; see docs/providers/oxia.md section 4.4
   warehouse?: string;   // Databend only: the warehouse every statement runs on, sent as the X-DATABEND-WAREHOUSE header; Databend Cloud requires one (the warehouse= value of its DSN) and resumes a suspended one on the first statement, billing while it runs. Not a secret
+  region?: string;      // S3-compatible object storage only: the region every request is signed for (the SigV4 credential scope); absent or empty means us-east-1. Garage refuses any region but its s3_region; a MinIO or Silo started with a site region refuses bucket and object reads signed for another. Not a secret
   skipObjectScan?: boolean; // read no catalog when this connection opens: zero reads on connect, so the editor is usable immediately and the object tree offers a load action instead of scanning (#765, an Oracle owner with 43,512 tables froze the browser on connect). It defers the CATALOG, not the walk: a connection that also declares `keyScan` keeps the sidebar's Objects / Keys switch, and the switch reads nothing, because the key panel mounts only when Keys is chosen and then takes the same bounded sample (#1169)
   readOnly?: boolean;      // refuse writes, value edits and maintenance before any request (#1089). Accepted only where the engine's provider enforces it: true anywhere else is refused at seed load and before any provider is built, and a value that is not a boolean is refused everywhere
   managed?: boolean;       // true = admin-controlled: not editable in the UI, secrets kept on the server
@@ -2158,7 +2184,7 @@ interface DatabaseConnection {
   apiKeySecret?: string;   // the pair's secret half; either alone (after trim) falls back to user/password rather than sending a key built from an empty half
 }
 
-type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend';
+type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3';
 type ConnectionEnvironment = 'production' | 'staging' | 'development' | 'local' | 'other';
 ```
 
